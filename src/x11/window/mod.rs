@@ -26,8 +26,18 @@ lazy_static! {      // TODO: use a static mutex when that's possible, and put me
     static ref GLOBAL_XOPENIM_LOCK: Mutex<()> = Mutex::new(());
 }
 
-unsafe extern "C" fn x_error_callback(_: *mut ffi::Display, event: *mut ffi::XErrorEvent) -> libc::c_int {
-    println!("[glutin] x error code={} major={} minor={}!", (*event).error_code, (*event).request_code, (*event).minor_code);
+unsafe extern "C" fn x_error_callback(dpy: *mut ffi::Display, event: *mut ffi::XErrorEvent) -> libc::c_int {
+    use std::ffi::CStr;
+    let len = 1024;
+    let mut buff: Vec<u8> = Vec::with_capacity(len);
+
+    ffi::XGetErrorText(dpy, (*event).error_code as i32, buff.as_mut_ptr() as *mut i8, len as i32);
+    let real_len = CStr::from_ptr(buff.as_mut_ptr() as *const i8).to_bytes().len();
+    buff.truncate(real_len);
+
+    let error = String::from_utf8(buff).unwrap();
+
+    println!("[glutin] x error code={} major={} minor={}: {}!", (*event).error_code, (*event).request_code, (*event).minor_code, error);
     0
 }
 
