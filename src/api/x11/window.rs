@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::os::raw::c_long;
 use std::thread;
 use std::time::Duration;
+use std::ffi::CString;
 
 use Api;
 use ContextError;
@@ -35,13 +36,6 @@ use super::{MonitorId, XConnection};
 // XOpenIM doesn't seem to be thread-safe
 lazy_static! {      // TODO: use a static mutex when that's possible, and put me back in my function
     static ref GLOBAL_XOPENIM_LOCK: Mutex<()> = Mutex::new(());
-}
-
-// TODO: remove me
-fn with_c_str<F, T>(s: &str, f: F) -> T where F: FnOnce(*const libc::c_char) -> T {
-    use std::ffi::CString;
-    let c_str = CString::new(s.as_bytes().to_vec()).unwrap();
-    f(c_str.as_ptr())
 }
 
 struct WindowProxyData {
@@ -466,15 +460,13 @@ impl Window {
 
         // creating window, step 2
         let wm_delete_window = unsafe {
-            let mut wm_delete_window = with_c_str("WM_DELETE_WINDOW", |delete_window|
-                (display.xlib.XInternAtom)(display.display, delete_window, 0)
-            );
+            let mut wm_delete_window = (display.xlib.XInternAtom)(display.display,
+                                                                  b"WM_DELETE_WINDOW\0".as_ptr() as *const _, 0);
             display.check_errors().expect("Failed to call XInternAtom");
             (display.xlib.XSetWMProtocols)(display.display, window, &mut wm_delete_window, 1);
             display.check_errors().expect("Failed to call XSetWMProtocols");
-            with_c_str(&*window_attrs.title, |title| {;
-                (display.xlib.XStoreName)(display.display, window, title);
-            });
+            let title = CString::new(&*window_attrs.title).unwrap();
+            (display.xlib.XStoreName)(display.display, window, title.as_ptr());
             display.check_errors().expect("Failed to call XStoreName");
             (display.xlib.XFlush)(display.display);
             display.check_errors().expect("Failed to call XFlush");
@@ -495,15 +487,10 @@ impl Window {
 
         // creating input context
         let ic = unsafe {
-            let ic = with_c_str("inputStyle", |input_style|
-                with_c_str("clientWindow", |client_window|
-                    (display.xlib.XCreateIC)(
-                        im, input_style,
-                        ffi::XIMPreeditNothing | ffi::XIMStatusNothing, client_window,
-                        window, ptr::null::<()>()
-                    )
-                )
-            );
+            let ic = (display.xlib.XCreateIC)(im, b"inputStyle\0".as_ptr() as *const _,
+                                              ffi::XIMPreeditNothing | ffi::XIMStatusNothing,
+                                              b"clientWindow\0".as_ptr() as *const _, window,
+                                              ptr::null::<()>());
             if ic.is_null() {
                 return Err(OsError(format!("XCreateIC failed")));
             }
@@ -523,29 +510,28 @@ impl Window {
 
         // Set ICCCM WM_CLASS property based on initial window title
         unsafe {
-            with_c_str(&*window_attrs.title, |c_name| {
-                let hint = (display.xlib.XAllocClassHint)();
-                (*hint).res_name = c_name as *mut libc::c_char;
-                (*hint).res_class = c_name as *mut libc::c_char;
-                (display.xlib.XSetClassHint)(display.display, window, hint);
-                display.check_errors().expect("Failed to call XSetClassHint");
-                (display.xlib.XFree)(hint as *mut _);
-            });
+            let title = CString::new(&*window_attrs.title).unwrap();
+            let c_name = title.as_ptr();
+            let hint = (display.xlib.XAllocClassHint)();
+            (*hint).res_name = c_name as *mut libc::c_char;
+            (*hint).res_class = c_name as *mut libc::c_char;
+            (display.xlib.XSetClassHint)(display.display, window, hint);
+            display.check_errors().expect("Failed to call XSetClassHint");
+            (display.xlib.XFree)(hint as *mut _);
         }
 
         let is_fullscreen = window_attrs.monitor.is_some();
 
         if is_fullscreen {
             let state_atom = unsafe {
-                with_c_str("_NET_WM_STATE", |state|
-                    (display.xlib.XInternAtom)(display.display, state, 0)
-                )
+                (display.xlib.XInternAtom)(display.display,
+                                           b"_NET_WM_STATE\0".as_ptr() as *const _, 0)
             };
             display.check_errors().expect("Failed to call XInternAtom");
+
             let fullscreen_atom = unsafe {
-                with_c_str("_NET_WM_STATE_FULLSCREEN", |state_fullscreen|
-                    (display.xlib.XInternAtom)(display.display, state_fullscreen, 0)
-                )
+                (display.xlib.XInternAtom)(display.display,
+                                           b"_NET_WM_STATE_FULLSCREEN\0".as_ptr() as *const _, 0)
             };
             display.check_errors().expect("Failed to call XInternAtom");
 
@@ -672,10 +658,29 @@ impl Window {
     }
 
     pub fn set_title(&self, title: &str) {
-        with_c_str(title, |title| unsafe {
-            (self.x.display.xlib.XStoreName)(self.x.display.display, self.x.window, title);
+        let title = title.as_bytes();
+        let len = title.len();
+
+        let title = CString::new(title).unwrap();
+
+        unsafe {
+            (self.x.display.xlib.XStoreName)(self.x.display.display,
+                                             self.x.window,
+                                             title.as_ptr() as *const _);
+
+            let wm_name = (self.x.display.xlib.XInternAtom)(self.x.display.display,
+                                                            b"_NET_WM_NAME\0".as_ptr() as *const _, 0);
+            let utf8 = (self.x.display.xlib.XInternAtom)(self.x.display.display,
+                                                         b"UTF8_STRING\0".as_ptr() as *const _, 0);
+
+            (self.x.display.xlib.XChangeProperty)(self.x.display.display,
+                                                  self.x.window,
+                                                  wm_name, utf8, 8,
+                                                  ffi::PropModeReplace,
+                                                  title.as_ptr() as *const _, len as libc::c_int);
+
             (self.x.display.xlib.XFlush)(self.x.display.display);
-        });
+        };
 
         self.x.display.check_errors().expect("Failed to call XStoreName");
     }
@@ -792,7 +797,6 @@ impl Window {
 
     pub fn set_cursor(&self, cursor: MouseCursor) {
         unsafe {
-            use std::ffi::CString;
             let cursor_name = match cursor {
                 MouseCursor::Alias => "link",
                 MouseCursor::Arrow => "arrow",
