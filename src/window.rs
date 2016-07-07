@@ -7,13 +7,11 @@ use ContextError;
 use CreationError;
 use CursorState;
 use Event;
-use GlAttributes;
 use GlContext;
 use GlProfile;
 use GlRequest;
 use MouseCursor;
 use PixelFormat;
-use PixelFormatRequirements;
 use Robustness;
 use Window;
 use WindowID;
@@ -44,7 +42,7 @@ impl<'a> WindowBuilder<'a> {
         self.window.dimensions = Some((width, height));
         self
     }
-    
+
     /// Sets a minimum dimension size for the window
     ///
     /// Width and height are in pixels.
@@ -65,8 +63,8 @@ impl<'a> WindowBuilder<'a> {
 
     /// Requests a specific title for the window.
     #[inline]
-    pub fn with_title(mut self, title: String) -> WindowBuilder<'a> {
-        self.window.title = title;
+    pub fn with_title<T: Into<String>>(mut self, title: T) -> WindowBuilder<'a> {
+        self.window.title = title.into();
         self
     }
 
@@ -335,7 +333,7 @@ impl Window {
     pub fn get_inner_size(&self) -> Option<(u32, u32)> {
         self.window.get_inner_size()
     }
-    
+
     /// Returns the size in points of the client area of the window.
     ///
     /// The client area is the content of the window, excluding the title bar and borders.

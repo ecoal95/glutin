@@ -13,12 +13,10 @@ use cocoa::appkit::*;
 use PixelFormat;
 use api::cocoa::helpers;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PlatformSpecificHeadlessBuilderAttributes;
 
 pub struct HeadlessContext {
-    width: u32,
-    height: u32,
     context: id,
 }
 
@@ -44,8 +42,6 @@ impl HeadlessContext {
         };
 
         let headless = HeadlessContext {
-            width: width,
-            height: height,
             context: context,
         };
 

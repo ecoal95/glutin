@@ -7,11 +7,8 @@ use libc;
 use ContextError;
 use GlAttributes;
 use GlContext;
-use GlProfile;
-use GlRequest;
 use PixelFormat;
 use PixelFormatRequirements;
-use ReleaseBehavior;
 use Robustness;
 use WindowAttributes;
 use native_monitor::NativeMonitorId;
@@ -26,8 +23,8 @@ use cocoa::base::{id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSArray, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect};
 use cocoa::foundation::{NSRunLoop, NSSize, NSString, NSUInteger};
 use cocoa::appkit;
-use cocoa::appkit::*;
-use cocoa::appkit::NSEventSubtype::*;
+use cocoa::*;
+use cocoa::NSEventSubtype::*;
 
 use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
@@ -43,14 +40,11 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::str::from_utf8;
 use std::sync::Mutex;
-use std::ascii::AsciiExt;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::env;
 
-use events::ElementState::{Pressed, Released};
-use events::Event::{Awakened, MouseInput, MouseMoved, ReceivedCharacter, KeyboardInput};
-use events::Event::{MouseWheel, Closed, Focused, TouchpadPressure};
+use events::ElementState;
 use events::{self, MouseButton, TouchPhase};
 
 pub use self::monitor::{MonitorId, get_available_monitors, get_primary_monitor};
@@ -219,7 +213,7 @@ impl Drop for WindowDelegate {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PlatformSpecificWindowBuilderAttributes {
     pub activation_policy: ActivationPolicy,
     pub app_name: Option<String>,
@@ -466,18 +460,24 @@ impl Window {
                 }
             };
 
-            let masks = if screen.is_some() || !attrs.decorations || attrs.transparent {
-                // Fullscreen, transparent, or opaque window without titlebar.
-                //
-                // Note that transparent windows never have decorations.
+            let masks = if screen.is_some() || attrs.transparent {
+                // Fullscreen or transparent window
                 NSBorderlessWindowMask as NSUInteger |
-                NSResizableWindowMask as NSUInteger
-            } else {
-                // Classic opaque window with titlebar.
+                NSResizableWindowMask as NSUInteger |
+                NSTitledWindowMask as NSUInteger
+            } else if attrs.decorations {
+                // Classic opaque window with titlebar
                 NSClosableWindowMask as NSUInteger |
                 NSMiniaturizableWindowMask as NSUInteger |
                 NSResizableWindowMask as NSUInteger |
                 NSTitledWindowMask as NSUInteger
+            } else {
+                // Opaque window without a titlebar
+                NSClosableWindowMask as NSUInteger |
+                NSMiniaturizableWindowMask as NSUInteger |
+                NSResizableWindowMask as NSUInteger |
+                NSTitledWindowMask as NSUInteger |
+                NSFullSizeContentViewWindowMask as NSUInteger
             };
 
             let window_class = match Class::get("GlutinWindow") {
@@ -508,9 +508,14 @@ impl Window {
 
             window.non_nil().map(|window| {
                 let title = IdRef::new(NSString::alloc(nil).init_str(&attrs.title));
+                window.setReleasedWhenClosed_(NO);
                 window.setTitle_(*title);
                 window.setAcceptsMouseMovedEvents_(YES);
 
+                if !attrs.decorations {
+                    window.setTitleVisibility_(NSWindowTitleVisibility::NSWindowTitleHidden);
+                    window.setTitlebarAppearsTransparent_(YES);
+                }
                 if screen.is_some() {
                     window.setLevel_(NSMainMenuWindowLevel as i64 + 1);
                 }
@@ -826,10 +831,10 @@ impl Window {
     }
 
     unsafe fn modifier_event(event: id, keymask: NSEventModifierFlags, key: events::VirtualKeyCode, key_pressed: bool) -> Option<Event> {
-        if !key_pressed && NSEvent::modifierFlags(event).contains(keymask) {
-            return Some(KeyboardInput(Pressed, NSEvent::keyCode(event) as u8, Some(key)));
-        } else if key_pressed && !NSEvent::modifierFlags(event).contains(keymask) {
-            return Some(KeyboardInput(Released, NSEvent::keyCode(event) as u8, Some(key)));
+        if !key_pressed && NSmodifierFlags(event).contains(keymask) {
+            return Some(KeyboardInput(ElementState::Pressed, NSkeyCode(event) as u8, Some(key)));
+        } else if key_pressed && !NSmodifierFlags(event).contains(keymask) {
+            return Some(KeyboardInput(ElementState::Released, NSkeyCode(event) as u8, Some(key)));
         }
 
         return None;
@@ -923,7 +928,10 @@ impl Window {
 
         unsafe {
             // TODO: Check for errors.
-            let _ = CGWarpMouseCursorPosition(CGPoint { x: cursor_x as CGFloat, y: cursor_y as CGFloat });
+            let _ = CGWarpMouseCursorPosition(CGPoint {
+                x: cursor_x as CGFloat,
+                y: cursor_y as CGFloat,
+            });
             let _ = CGAssociateMouseAndMouseCursorPosition(true);
         }
 
@@ -966,7 +974,7 @@ impl GlContext for Window {
 
     #[inline]
     fn swap_buffers(&self) -> Result<(), ContextError> {
-        unsafe { 
+        unsafe {
             let pool = NSAutoreleasePool::new(nil);
             self.context.flushBuffer();
             let _: () = msg_send![pool, release];
@@ -1029,7 +1037,7 @@ impl Clone for IdRef {
     }
 }
 
-#[allow(non_snake_case)]
+#[allow(non_snake_case, non_upper_case_globals)]
 unsafe fn NSEventToEvent(window: &Window, nsevent: id) -> Option<Event> {
     unsafe fn get_mouse_position(window: &Window, nsevent: id) -> (i32, i32) {
         let window_point = nsevent.locationInWindow();
@@ -1086,35 +1094,35 @@ unsafe fn NSEventToEvent(window: &Window, nsevent: id) -> Option<Event> {
                 events.push_back(ReceivedCharacter(received_char));
             }
 
-            let vkey =  event::vkeycode_to_element(NSEvent::keyCode(nsevent));
-            events.push_back(KeyboardInput(Pressed, NSEvent::keyCode(nsevent) as u8, vkey));
+            let vkey =  event::vkeycode_to_element(NSkeyCode(nsevent));
+            events.push_back(KeyboardInput(ElementState::Pressed, NSkeyCode(nsevent) as u8, vkey));
             let event = events.pop_front();
             window.delegate.state.pending_events.lock().unwrap().extend(events.into_iter());
             event
         },
         NSKeyUp => {
-            let vkey =  event::vkeycode_to_element(NSEvent::keyCode(nsevent));
+            let vkey =  event::vkeycode_to_element(NSkeyCode(nsevent));
 
-            Some(KeyboardInput(Released, NSEvent::keyCode(nsevent) as u8, vkey))
+            Some(KeyboardInput(ElementState::Released, NSkeyCode(nsevent) as u8, vkey))
         },
         NSFlagsChanged => {
             let mut events = VecDeque::new();
-            let shift_modifier = Window::modifier_event(nsevent, appkit::NSShiftKeyMask, events::VirtualKeyCode::LShift, shift_pressed);
+            let shift_modifier = Window::modifier_event(nsevent, NSShiftKeyMask, events::VirtualKeyCode::LShift, shift_pressed);
             if shift_modifier.is_some() {
                 shift_pressed = !shift_pressed;
                 events.push_back(shift_modifier.unwrap());
             }
-            let ctrl_modifier = Window::modifier_event(nsevent, appkit::NSControlKeyMask, events::VirtualKeyCode::LControl, ctrl_pressed);
+            let ctrl_modifier = Window::modifier_event(nsevent, NSControlKeyMask, events::VirtualKeyCode::LControl, ctrl_pressed);
             if ctrl_modifier.is_some() {
                 ctrl_pressed = !ctrl_pressed;
                 events.push_back(ctrl_modifier.unwrap());
             }
-            let win_modifier = Window::modifier_event(nsevent, appkit::NSCommandKeyMask, events::VirtualKeyCode::LWin, win_pressed);
+            let win_modifier = Window::modifier_event(nsevent, NSCommandKeyMask, events::VirtualKeyCode::LWin, win_pressed);
             if win_modifier.is_some() {
                 win_pressed = !win_pressed;
                 events.push_back(win_modifier.unwrap());
             }
-            let alt_modifier = Window::modifier_event(nsevent, appkit::NSAlternateKeyMask, events::VirtualKeyCode::LAlt, alt_pressed);
+            let alt_modifier = Window::modifier_event(nsevent, NSAlternateKeyMask, events::VirtualKeyCode::LAlt, alt_pressed);
             if alt_modifier.is_some() {
                 alt_pressed = !alt_pressed;
                 events.push_back(alt_modifier.unwrap());
@@ -1253,7 +1261,7 @@ thread_local! {
     static WAKEUP_EVENT: id = {
         unsafe {
             let event =
-                NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+                NSotherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
                     nil,
                     NSApplicationDefined,
                     NSPoint::new(0.0, 0.0),
@@ -1269,4 +1277,3 @@ thread_local! {
         }
     }
 }
-
